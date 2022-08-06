@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"time"
 
@@ -30,6 +33,8 @@ type Model struct {
 	options  []string
 	selected map[int]struct{}
 	spinner  spinner.Model
+	score1   string
+	score2   string
 }
 
 func (m Model) Init() tea.Cmd {
@@ -42,13 +47,18 @@ func initializeModel() Model {
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 	return Model{
 		cursor:   0,
-		options:  []string{"Counter", "Wheather"},
+		options:  []string{"Score"},
 		selected: make(map[int]struct{}),
 		spinner:  s,
+		score1:   "",
+		score2:   "",
 	}
 }
 
+type TickMsg time.Time
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -69,18 +79,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.selected[m.cursor] = struct{}{}
 			}
+		case "r":
+			return &m, tickEvery()
 		}
-	default:
-		var cmd tea.Cmd
+	case TickMsg:
+		score := getScore()
+		fmt.Println("-->", score)
+		if len(score) > 0 {
+			m.score1 = fmt.Sprintf("%s R: %f / %f O: %f \n", score[0].inning, score[0].r, score[0].w, score[0].o)
+			m.score2 = fmt.Sprintf("%s R: %f / %f O: %f \n", score[1].inning, score[1].r, score[1].w, score[1].o)
+		}
+		return &m, tickEvery()
+	case spinner.TickMsg:
 		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
+		return &m, cmd
 
 	}
-	return &m, nil
+	return &m, cmd
+}
+
+func tickEvery() tea.Cmd {
+	return tea.Every(time.Millisecond*3000, func(t time.Time) tea.Msg {
+		return TickMsg(t)
+	})
 }
 
 func (m Model) View() string {
-	// return fmt.Sprintf("count: %d \n\n ↑ increse ↓ decrese", m.count)
+	return optionView(&m)
+
+}
+
+func optionView(m *Model) string {
 	s := "What operation you would like to perform \n\n"
 
 	for i, option := range m.options {
@@ -96,21 +125,72 @@ func (m Model) View() string {
 			result = m.spinner.View()
 		}
 
-		s += fmt.Sprintf("%s [%s] %s %s \n", cursor, checked, option, result)
+		s += fmt.Sprintf(
+			"%s [%s] %s %s \n %s\n %s\n",
+			cursor,
+			checked,
+			option,
+			result,
+			m.score1,
+			m.score2,
+		)
 	}
 
+	s += "\nPress r to refresh.\n"
 	s += "\nPress q to quit.\n"
 
 	return s
 }
 
-// func getWheather() (w string) {
-// 	var client = &http.Client{
-// 		Timeout: 10 * time.Second,
-// 	}
-// 	res, err := client.Get("https://charm.sh/")
-// 	if err != nil {
-// 		panic("API failed")
-// 	}
-// 	return res.Status
-// }
+type Score struct {
+	r      float64
+	w      float64
+	o      float64
+	inning string
+}
+
+func getScore() []Score {
+
+	client := &http.Client{
+		Timeout: time.Second * 5,
+	}
+	res, err := client.Get("https://api.cricapi.com/v1/currentMatches?apikey=e2e0863d-5e3d-4669-8d5b-d30c3a5017c0&offset=0")
+	if err != nil {
+		panic("Failed to get score")
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		panic("Failed to read response")
+	}
+	m := map[string]interface{}{}
+	json.Unmarshal(body, &m)
+	if data, ok := m["data"]; ok {
+		if list, found := data.([]interface{}); found {
+			for i := range list {
+				mat, _ := json.Marshal(list[i])
+				match := map[string]interface{}{}
+				json.Unmarshal(mat, &match)
+				if mt, k := match["name"].(string); k {
+					if mt == "West Indies vs India, 4th T20I" {
+						scores, _ := match["score"].([]interface{})
+						score := []Score{}
+						for s := range scores {
+							inning, _ := json.Marshal(scores[s])
+							inn := map[string]interface{}{}
+							json.Unmarshal(inning, &inn)
+							score = append(score, Score{
+								r:      inn["r"].(float64),
+								o:      inn["o"].(float64),
+								w:      inn["w"].(float64),
+								inning: inn["inning"].(string),
+							})
+						}
+						return score
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
